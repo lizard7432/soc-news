@@ -1,0 +1,19 @@
+services:
+  soc-news:
+    build: .
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:8000"
+    environment:
+      DATA_DIR: /data
+      MODEL_CACHE: /models
+      SEMANTIC_ENABLED: ${SEMANTIC_ENABLED:-true}
+      AUTO_MERGE_THRESHOLD: ${AUTO_MERGE_THRESHOLD:-0.94}
+      SHIFT_REPORT_HOURS: ${SHIFT_REPORT_HOURS:-11,19,3}
+      SHIFT_NAMES: ${SHIFT_NAMES:-日班,小夜班,大夜班}
+    volumes:
+      - soc-data:/data
+      - soc-models:/models
+    restart: unless-stopped
+volumes:
+  soc-data:
+  soc-models:
