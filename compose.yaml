@@ -2,7 +2,7 @@ services:
   soc-news:
     build: .
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:8080:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:7879:8000"
     environment:
       DATA_DIR: /data
       MODEL_CACHE: /models
