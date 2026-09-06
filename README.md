@@ -13,7 +13,7 @@ docker compose up -d --build
 docker compose logs -f --tail=100
 ```
 
-4. 預設只在伺服器的 `http://127.0.0.1:8080` 提供服務。將公司 HTTPS 反向代理轉到此位址，再提供公司內部網址給同事。
+4. 預設只在伺服器的 `http://127.0.0.1:7879` 提供服務。將公司 HTTPS 反向代理轉到此位址，再提供公司內部網址給同事。
 5. 開啟網頁後查看右側「蒐集狀態」。首次啟動會下載約數百 MB 的模型；完成後自動進行首次蒐集，之後每個整點再跑一次。
 
 若公司反向代理在另一部機器，可將 `BIND_ADDRESS` 改為伺服器的內網 IP。依需求已移除平台登入，能連到平台的同事即可操作；操作紀錄統一標示 internal-user。
@@ -28,7 +28,7 @@ docker compose logs -f --tail=100
 
 - ZIP 是部署原始碼，不能直接雙擊當成網站。請先解壓，再執行 Docker Compose。
 - 顯示 Docker daemon 無法連線：先啟動 Docker 服務，再重跑 `docker compose up -d --build`。
-- 在伺服器上開 `http://127.0.0.1:8080/health` 應看到 `{"ok":true}`。首頁直接顯示新聞列表，不要求登入。
+- 在伺服器上開 `http://127.0.0.1:7879/health` 應看到 `{"ok":true}`。首頁直接顯示新聞列表，不要求登入。
 - 同事電腦的 `127.0.0.1` 是同事自己的電腦。正式使用請開公司 HTTPS 反向代理網址，不能使用同事電腦的 localhost。
 - 預設 `BIND_ADDRESS=127.0.0.1` 只允許伺服器本機存取。如需從內網反向代理連入，依上節設定內網 IP 及防火牆；修改後重跑 `docker compose up -d`。
 - 查看實際錯誤：`docker compose ps` 與 `docker compose logs --tail=100`。提供錯誤訊息時，不必附上 `.env` 密碼。
