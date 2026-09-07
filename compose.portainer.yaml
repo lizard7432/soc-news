@@ -13,12 +13,6 @@ services:
       SHIFT_REPORT_HOURS: "11,19,3"
       SHIFT_NAMES: "日班,小夜班,大夜班"
     volumes:
-      - type: bind
-        source: /opt/soc-news/app
-        target: /app/app
-        read_only: true
-        bind:
-          create_host_path: false
       - soc-data:/data
       - soc-models:/models
     restart: unless-stopped

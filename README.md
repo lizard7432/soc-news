@@ -4,9 +4,9 @@
 
 ## 部署
 
-使用 Portainer（Docker Standalone）請參閱 [Portainer 部署步驟](PORTAINER.md)，並使用 [compose.portainer.yaml](compose.portainer.yaml)。該版本使用主機預先建置的映像與 app 絕對掛載路徑。
+使用 Portainer（Docker Standalone）請參閱 [Portainer 部署步驟](PORTAINER.md)，並使用 [compose.portainer.yaml](compose.portainer.yaml)。該版本使用預先建置的映像內建程式，不掛載主機 app，也不需要在 Portainer 上傳程式資料夾。
 
-Compose 現在將專案旁的 `./app` 唯讀掛載到容器 `/app/app`。部署時必須保留完整的 `app` 資料夾，不能只複製 Compose 或建立空資料夾。`create_host_path: false` 會在主機路徑不存在時報錯，不會自動建立空目錄；已存在但為空或不完整的資料夾仍會遮住映像內的程式並造成服務失敗。Build 不會將程式回填到主機掛載目錄。
+命令列用的 `compose.yaml` 將專案旁的 `./app` 唯讀掛載到容器 `/app/app`。部署時必須保留完整的 `app` 資料夾，不能只複製 Compose 或建立空資料夾。`create_host_path: false` 會在主機路徑不存在時報錯，不會自動建立空目錄；已存在但為空或不完整的資料夾仍會遮住映像內的程式並造成服務失敗。Build 不會將程式回填到主機掛載目錄。
 
 首次套用此掛載設定，執行 `docker compose up -d`（尚無映像時使用 `docker compose up -d --build`）。之後修改 `app/index.html` 只需重新整理網頁；修改 Python 程式後執行 `docker compose restart soc-news`；修改 `requirements.txt` 或 Dockerfile 仍須 `docker compose up -d --build`。主機檔案須讓容器使用者 UID 10001 可讀取。`soc-data` 與 `soc-models` 仍使用原本的具名 volume，不會因本次更新切換資料位置。
 
