@@ -4,6 +4,12 @@
 
 ## 部署
 
+Compose 現在將專案旁的 `./app` 唯讀掛載到容器 `/app/app`。部署時必須保留完整的 `app` 資料夾，不能只複製 Compose 或建立空資料夾。`create_host_path: false` 會在主機路徑不存在時報錯，不會自動建立空目錄；已存在但為空或不完整的資料夾仍會遮住映像內的程式並造成服務失敗。Build 不會將程式回填到主機掛載目錄。
+
+首次套用此掛載設定，執行 `docker compose up -d`（尚無映像時使用 `docker compose up -d --build`）。之後修改 `app/index.html` 只需重新整理網頁；修改 Python 程式後執行 `docker compose restart soc-news`；修改 `requirements.txt` 或 Dockerfile 仍須 `docker compose up -d --build`。主機檔案須讓容器使用者 UID 10001 可讀取。`soc-data` 與 `soc-models` 仍使用原本的具名 volume，不會因本次更新切換資料位置。
+
+本次掛載設定尚未經 Docker 容器實測。
+
 1. 將此資料夾放到公司伺服器，需有 Docker Engine 與 Docker Compose v2。
 2. 不需要帳號密碼。只有要調整綁定位址或班別時，才需複製 `.env.example` 為 `.env`。
 3. 在資料夾內執行：
