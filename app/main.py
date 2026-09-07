@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from .feed_settings import DEFAULT_SEARCH, FEED_HOSTS, validate_url, read_feed
 from .dedup import decision
 from .relevance import security_relevant
 from .source_policy import simplified_chars, verify, original_date, resolve_source, traditional_domain
@@ -92,6 +93,7 @@ def init():
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
         ''')
         c.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('sources', json.dumps(DEFAULT_SOURCES)))
+        c.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('keywords', json.dumps({'search': DEFAULT_SEARCH, 'exclude': []})))
         sources=json.loads(c.execute("SELECT value FROM settings WHERE key='sources'").fetchone()[0])
         for source in sources:
             if source['name']=='Google 新聞・台灣資安':
@@ -168,7 +170,7 @@ def ingest(c, title, summary, url, published, source):
     if c.execute('SELECT 1 FROM articles WHERE url=?', (url,)).fetchone():
         return False
     text = title + ' ' + summary
-    if not security_relevant(title,summary):
+    if excluded(c, title, summary) or not security_relevant(title,summary):
         return False
     v = vector(text)
     rows = c.execute('''SELECT a.*,e.exported,e.status FROM articles a JOIN events e ON e.id=a.event_id
@@ -246,7 +248,7 @@ def policy_review():
 def safe_article(c,event_id,start=None,end=None):
     rows=c.execute("SELECT * FROM articles WHERE event_id=? AND source_status='verified' AND original_published IS NOT NULL AND source_checked>=? ORDER BY original_published,id",(event_id,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat())).fetchall()
     for row in rows:
-        if not security_relevant(row['title'],row['summary'] or ''): continue
+        if excluded(c, row['title'], row['summary'] or '') or not security_relevant(row['title'],row['summary'] or ''): continue
         published=datetime.fromisoformat(row['original_published'])
         if published>datetime.now(timezone.utc): continue
         if start is not None and not (start<published<=end): continue
@@ -262,16 +264,21 @@ def collect():
     try:
         with db() as c:
             sources = json.loads(c.execute("SELECT value FROM settings WHERE key='sources'").fetchone()[0])
+            keywords = json.loads(c.execute("SELECT value FROM settings WHERE key='keywords'").fetchone()[0])
+        google_done = False
         for src in sources:
             if not src['enabled']:
                 continue
             started, count, error = now(), 0, ''
             try:
-                # Sources are fixed by server configuration, not arbitrary browser input.
-                with httpx.Client(timeout=30, follow_redirects=True, headers={'User-Agent':'SOCNews/1.0 RSS Reader'}) as client:
-                    response = client.get(src['url'])
-                    response.raise_for_status()
-                    feed = feedparser.parse(response.content)
+                url = src['url']
+                if urlparse(url).hostname == 'news.google.com':
+                    if google_done or not keywords['search']:
+                        continue
+                    google_done = True
+                    query = '(' + ' OR '.join(chr(34)+k+chr(34) for k in keywords['search']) + ') when:2d'
+                    url = 'https://news.google.com/rss/search?' + urlencode({'q': query, 'hl': 'zh-TW', 'gl': 'TW', 'ceid': 'TW:zh-Hant'})
+                feed = read_feed(url)
                 if not feed.entries:
                     raise ValueError('來源未回傳新聞項目，請檢查 RSS 格式或來源狀態')
                 with db() as c:
@@ -484,3 +491,84 @@ def export(body: Export, actor=Depends(user)):
 def history(actor=Depends(user)):
     with db() as c:
         return [dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 200')]
+
+
+def excluded(c, title, summary):
+    row = c.execute("SELECT value FROM settings WHERE key='keywords'").fetchone()
+    terms = json.loads(row[0])['exclude'] if row else []
+    return any(term.casefold() in (title+' '+summary).casefold() for term in terms)
+
+@app.get('/api/settings')
+def get_settings():
+    with db() as c:
+        result = {r['key']: json.loads(r['value']) for r in c.execute("SELECT * FROM settings WHERE key IN ('sources','keywords')")}
+    result['supported_hosts'] = FEED_HOSTS
+    return result
+
+class SourceInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=2000)
+
+@app.post('/api/sources/test')
+def test_source(body: SourceInput):
+    try:
+        feed = read_feed(body.url.strip())
+        return {'count': len(feed.entries), 'titles': [clean(x.get('title','')) for x in feed.entries[:3]]}
+    except Exception as e:
+        raise HTTPException(400, str(e)[:300])
+
+@app.post('/api/sources')
+def add_source(body: SourceInput):
+    name, url = body.name.strip(), body.url.strip()
+    if not name: raise HTTPException(400, '請填寫來源名稱')
+    try: validate_url(url)
+    except ValueError as e: raise HTTPException(400, str(e))
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        sources = json.loads(c.execute("SELECT value FROM settings WHERE key='sources'").fetchone()[0])
+        if any(x['url'] == url or x['name'] == name for x in sources):
+            raise HTTPException(409, '此來源名稱或網址已存在')
+        if len(sources) >= 50: raise HTTPException(400, '最多50個來源')
+        sources.append({'name': name, 'url': url, 'enabled': True})
+        c.execute("UPDATE settings SET value=? WHERE key='sources'", (json.dumps(sources),))
+        audit(c, 'internal-user', 'add_source', {'name': name, 'url': url})
+    return {'ok': True}
+
+class SourceToggle(BaseModel):
+    url: str
+    enabled: bool
+
+@app.post('/api/sources/toggle')
+def toggle_source(body: SourceToggle):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        sources = json.loads(c.execute("SELECT value FROM settings WHERE key='sources'").fetchone()[0])
+        match = next((x for x in sources if x['url'] == body.url), None)
+        if match is None: raise HTTPException(404, '找不到來源')
+        match['enabled'] = body.enabled
+        c.execute("UPDATE settings SET value=? WHERE key='sources'", (json.dumps(sources),))
+        audit(c, 'internal-user', 'toggle_source', body.model_dump())
+    return {'ok': True}
+
+class KeywordChange(BaseModel):
+    kind: str
+    term: str = Field(min_length=1, max_length=40)
+    remove: bool = False
+
+@app.post('/api/keywords')
+def change_keyword(body: KeywordChange):
+    term = body.term.strip()
+    if body.kind not in ('search','exclude') or not term or any(x in term for x in ['"', chr(10), chr(13)]):
+        raise HTTPException(400, '請填寫有效關鍵字（最多40字，不含雙引號或換行）')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        keywords = json.loads(c.execute("SELECT value FROM settings WHERE key='keywords'").fetchone()[0])
+        terms = keywords[body.kind]
+        if body.remove:
+            keywords[body.kind] = [x for x in terms if x.casefold() != term.casefold()]
+        elif not any(x.casefold() == term.casefold() for x in terms):
+            if len(terms) >= 50: raise HTTPException(400, '每組最多50個關鍵字')
+            terms.append(term)
+        c.execute("UPDATE settings SET value=? WHERE key='keywords'", (json.dumps(keywords),))
+        audit(c, 'internal-user', 'keyword_change', body.model_dump())
+    return {'ok': True}

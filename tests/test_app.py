@@ -86,16 +86,13 @@ def test_substantive_update_can_export_again():
     assert '【事件更新】' in result['text']
 
 def test_source_failure_visible(monkeypatch):
-    class Broken:
-        def __init__(self,**kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self,*args): pass
-        def get(self,url): raise RuntimeError('test source unavailable')
-    monkeypatch.setattr(m.httpx,'Client',Broken)
+    def broken(url): raise RuntimeError('test source unavailable')
+    monkeypatch.setattr(m, 'read_feed', broken)
     m.collect()
     with m.db() as c:
         rows=c.execute('SELECT * FROM runs').fetchall()
-        assert len(rows)==len(m.DEFAULT_SOURCES) and all(r['status']=='error' for r in rows)
+        assert len(rows)==sum('news.google.com' not in s['url'] for s in m.DEFAULT_SOURCES)+1
+        assert all(r['status']=='error' and 'test source unavailable' in r['error'] for r in rows)
     assert not m.LOCK.locked()
 
 def test_scope_flag_and_script_sanitizing():
