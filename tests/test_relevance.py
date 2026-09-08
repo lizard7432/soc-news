@@ -1,4 +1,28 @@
 from app.relevance import security_relevant
+import pytest
+
+
+@pytest.mark.parametrize('title', [
+    '【編輯室札記】因應資安大海嘯 落實補丁作業',
+    '社論：企業應重視網路安全',
+    '【觀點／王小明】資安治理的下一步',
+    '[專欄] AI時代的資安挑戰',
+    '【教學】如何設定帳號密碼',
+    '【廣編特輯】企業資安最佳選擇',
+])
+def test_explicit_non_news_labels_are_excluded(title):
+    assert not security_relevant(title, 'Chrome修補CVE-2026-1234漏洞，企業需要關注資安。')
+
+
+@pytest.mark.parametrize('title', [
+    'Chrome發布緊急修補，修復CVE-2026-1234漏洞',
+    '政府公布新版資安政策',
+    '資安廠商發布新型防火牆',
+    '駭客入侵媒體伺服器，竄改社論與評論內容',
+    '【資安新聞】研究人員揭露伺服器漏洞',
+])
+def test_news_with_incidental_editorial_words_remains(title):
+    assert security_relevant(title)
 
 
 def test_entertainment_leaks_are_not_security():

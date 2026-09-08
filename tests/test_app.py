@@ -26,6 +26,45 @@ def test_url_dedup():
     with m.db() as c:
         assert c.execute('SELECT count(*) FROM articles').fetchone()[0]==1
 
+
+def test_editorial_existing_article_is_not_shareable():
+    assert add()
+    with m.db() as c:
+        c.execute("UPDATE articles SET title=?,source_checked=?", ('【編輯室札記】因應資安大海嘯 落實補丁作業',m.now()))
+        assert m.safe_article(c,1) is None
+    event=TestClient(m.app).get('/api/state').json()['events'][0]
+    assert event['safe_to_share'] is False
+
+
+def test_editorial_not_ingested():
+    assert not add(title='【編輯室札記】因應資安大海嘯 落實補丁作業')
+
+
+def test_short_links_cache_and_failure(monkeypatch):
+    url='https://www.ithome.com.tw/news/'+('a'*100)
+    assert add(url)
+    calls=[]
+    class Shortener:
+        def __init__(self,**kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def post(self,endpoint,data,headers):
+            calls.append(data['url'])
+            return type('Reply',(),{'raise_for_status':lambda self:None,'json':lambda self:{'short_url':'http://spoo.me/Test123'}})()
+    monkeypatch.setattr(m.httpx,'Client',Shortener)
+    monkeypatch.setattr(m,'SHORT_RETRY_AFTER',0)
+    assert m.short_links(m.ShortenInput(ids=[1]))['links'][url]=='https://spoo.me/Test123'
+    assert m.short_links(m.ShortenInput(ids=[1]))['links'][url]=='https://spoo.me/Test123'
+    assert calls==[url]
+    with m.db() as c:
+        c.execute('DELETE FROM short_links')
+    def fail(*args,**kwargs): raise RuntimeError('offline')
+    monkeypatch.setattr(Shortener,'post',fail)
+    result=m.short_links(m.ShortenInput(ids=[1]))
+    assert result=={'links':{},'failed':1}
+    with m.db() as c:
+        assert c.execute('SELECT exported FROM events WHERE id=1').fetchone()[0] is None
+
 def test_paraphrase_semantic_merge(monkeypatch):
     monkeypatch.setattr(m,'vector',lambda text:[0.8,0.6])
     add()

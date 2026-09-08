@@ -91,6 +91,7 @@ def init():
         CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT,finished TEXT,source TEXT,status TEXT,count INTEGER,error TEXT);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at TEXT,actor TEXT,action TEXT,detail TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+        CREATE TABLE IF NOT EXISTS short_links(url TEXT PRIMARY KEY,short_url TEXT NOT NULL);
         ''')
         c.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('sources', json.dumps(DEFAULT_SOURCES)))
         c.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('keywords', json.dumps({'search': DEFAULT_SEARCH, 'exclude': []})))
@@ -572,3 +573,54 @@ def change_keyword(body: KeywordChange):
         c.execute("UPDATE settings SET value=? WHERE key='keywords'", (json.dumps(keywords),))
         audit(c, 'internal-user', 'keyword_change', body.model_dump())
     return {'ok': True}
+
+
+SHORT_LOCK = threading.Lock()
+SHORT_RETRY_AFTER = 0.0
+
+class ShortenInput(BaseModel):
+    ids: list[int] = Field(max_length=50)
+
+@app.post('/api/short-links')
+def short_links(body: ShortenInput):
+    global SHORT_RETRY_AFTER
+    if not SHORT_LOCK.acquire(blocking=False):
+        raise HTTPException(409, '正在產生短網址，請稍後再試')
+    try:
+        links, failed = {}, 0
+        with db() as c:
+            urls=[]
+            for event_id in dict.fromkeys(body.ids):
+                event=c.execute('SELECT * FROM events WHERE id=?',(event_id,)).fetchone()
+                if not event or event['exported'] or event['status']=='excluded' or event['candidate']: continue
+                article=safe_article(c,event_id)
+                if article and len(article['url'])>80: urls.append(article['url'])
+        deadline=time.monotonic()+25
+        with httpx.Client(timeout=5, follow_redirects=False) as client:
+            for url in dict.fromkeys(urls):
+                with db() as c:
+                    cached=c.execute('SELECT short_url FROM short_links WHERE url=?',(url,)).fetchone()
+                if cached:
+                    links[url]=cached[0]; continue
+                if time.monotonic()<SHORT_RETRY_AFTER or time.monotonic()>deadline:
+                    failed+=1; continue
+                try:
+                    r=client.post('https://spoo.me/',data={'url':url},headers={'Accept':'application/json'})
+                    r.raise_for_status()
+                    data=r.json()
+                    if data.get('errorcode'):
+                        raise ValueError('Shortener error')
+                    short=data.get('short_url','')
+                    if short.startswith('http://spoo.me/'):
+                        short='https://'+short[len('http://'):]
+                    if not re.fullmatch(r'https://spoo[.]me/[A-Za-z0-9_-]+',short):
+                        raise ValueError('Unexpected short URL')
+                    with db() as c:
+                        c.execute('INSERT OR REPLACE INTO short_links VALUES (?,?)',(url,short))
+                    links[url]=short
+                except Exception:
+                    failed+=1
+                    SHORT_RETRY_AFTER=time.monotonic()+60
+        return {'links':links,'failed':failed}
+    finally:
+        SHORT_LOCK.release()

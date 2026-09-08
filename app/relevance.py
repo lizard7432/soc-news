@@ -5,8 +5,17 @@ STRONG = re.compile(r'資安|資訊安全|網路安全|網絡安全|網攻|零�
 ACTION = re.compile(r'外洩|洩漏|漏洞|駭客|入侵|釣魚|勒索|修補|竊取|盜用')
 DIGITAL = re.compile(r'帳號|帳密|密碼|憑證|伺服器|資料庫|軟體|韌體|程式|系統|路由器|防火牆|病歷|客戶資料|用戶資料|使用者資料|電腦|惡意連結|電子郵件|API|Chrome|Windows|Linux|WordPress|GitHub', re.I)
 
+# Match editorial labels, not incidental mentions in incident reporting.
+NON_NEWS_LABEL = re.compile(
+    r'^\s*(?:[【\[［「]\s*(?:編輯室札記|編輯手記|社論|評論|專欄|觀點|投書|教學|懶人包|廣編特輯|業配|工商服務)'
+    r'(?:\s*[】\]］」]|[：:／/｜|][^】\]］」]*[】\]］」])'
+    r'|(?:編輯室札記|編輯手記|社論|評論|專欄|觀點|投書|教學|懶人包|廣編特輯|業配|工商服務)\s*[：:／/｜|])'
+)
+
 
 def security_relevant(title, summary=''):
+    if NON_NEWS_LABEL.search(title):
+        return False
     if re.search(r'概念股|飆股|潛力股|股價|股市|選股|誰.*獲利|訂單.*獲利|財報|利潤率|殖利率|目標價', title):
         return False
     # Stock-picking roundups must have security as their leading subject.
