@@ -13,7 +13,29 @@ NON_NEWS_LABEL = re.compile(
 )
 
 
+# The drama name alone is not evidence of a cybersecurity subject.
+DRAMA_NAME = re.compile(r'零日攻擊|zero\s*day', re.I)
+SCREEN_CONTEXT = re.compile(r'影集|台劇|臺劇|電視劇|戲劇|劇組|劇情|演員|主演|男主|女主|金鐘|報獎|收視|首播|首映|預告|卡司|製作人|編劇|高橋一生')
+FICTION_CONTEXT = re.compile(r'劇中|劇情|飾演|扮演|預告|虛構')
+REAL_INCIDENT = re.compile(r'CVE-\d|漏洞|修補|遭駭|遭入侵|個資外洩|資料外洩|資料洩漏|帳號.*(?:劫持|盜用)|勒索軟體|DDoS', re.I)
+
+def drama_coverage(title, summary):
+    if not DRAMA_NAME.search(title+'。'+summary):
+        return False
+    if not SCREEN_CONTEXT.search(title+'。'+summary):
+        return False
+    # A real platform incident can mention a drama; fictional plot descriptions cannot override the filter.
+    clauses = re.split(r'[。！？!?；;\n]', title)
+    for part in clauses:
+        clean = DRAMA_NAME.sub('',part)
+        if not FICTION_CONTEXT.search(clean) and REAL_INCIDENT.search(clean) and re.search(r'平台|串流|網站|伺服器|帳號|個資|資料|CVE-|Chrome|Windows|漏洞|修補',clean,re.I):
+            return False
+    return True
+
+
 def security_relevant(title, summary=''):
+    if drama_coverage(title, summary):
+        return False
     if NON_NEWS_LABEL.search(title):
         return False
     if re.search(r'概念股|飆股|潛力股|股價|股市|選股|誰.*獲利|訂單.*獲利|財報|利潤率|殖利率|目標價', title):

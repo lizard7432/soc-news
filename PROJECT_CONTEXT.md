@@ -16,3 +16,10 @@ FastAPI + SQLite；app/main.py 為收集、排程、資料與API；app/source_po
 
 ## 換機
 安裝 Python 3.10+，建立虛擬環境，pip install -r requirements.txt；設定 DATA_DIR 與 MODEL_CACHE 後執行 uvicorn app.main:app。或按 README 使用 Docker Compose。正式部署使用持久 volume 並獨立備份 SQLite。
+
+## ML 回饋入口整合（2026-09-09）
+
+人工修正集中在 SOCNEWS「查看模型結果／選用修正」，經 outbox 傳至 ML。ML 管理台只讀回饋。每輪背景分析同步最多 20 筆舊分析的正文去重結果，依分析時間輪替；保留相關性及交班資格，不自動合併事件。
+
+## 職責修正
+SOCNEWS 先以資安規則與排除詞過濾，ML 僅查重（analysis_task=dedup）。交班資格不使用 ML relevance decision。舊紀錄保留，ML 停用時仍使用 SOCNEWS 篩選。

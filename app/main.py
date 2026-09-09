@@ -19,6 +19,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from .feed_settings import DEFAULT_SEARCH, FEED_HOSTS, validate_url, read_feed
+from . import ml_bridge
 from .dedup import decision
 from .relevance import security_relevant
 from .source_policy import simplified_chars, verify, original_date, resolve_source, traditional_domain
@@ -116,6 +117,7 @@ def init():
         if not previous or previous[0]!=policy_version:
             c.execute("UPDATE articles SET source_checked=NULL WHERE source_status IN ('unverified','rejected')")
             c.execute("INSERT OR REPLACE INTO settings VALUES ('source_policy_version',?)",(policy_version,))
+        ml_bridge.init(c)
         c.execute('CREATE TABLE IF NOT EXISTS distinct_events(a INTEGER,b INTEGER,reason TEXT,PRIMARY KEY(a,b))')
 
 def user():
@@ -250,6 +252,12 @@ def safe_article(c,event_id,start=None,end=None):
     rows=c.execute("SELECT * FROM articles WHERE event_id=? AND source_status='verified' AND original_published IS NOT NULL AND source_checked>=? ORDER BY original_published,id",(event_id,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat())).fetchall()
     for row in rows:
         if excluded(c, row['title'], row['summary'] or '') or not security_relevant(row['title'],row['summary'] or ''): continue
+        cfg = ml_bridge.config(c)
+        if cfg['enabled']:
+            analysis = c.execute("SELECT result FROM ml_articles WHERE article_id=? AND status='done' AND service=?",(row['id'],cfg['url'])).fetchone()
+            verdict = json.loads(analysis[0]) if analysis and analysis[0] else {}
+            if verdict.get('duplicate_decision') != 'unique': continue
+        elif excluded(c, row['title'], row['summary'] or '') or not security_relevant(row['title'],row['summary'] or ''): continue
         published=datetime.fromisoformat(row['original_published'])
         if published>datetime.now(timezone.utc): continue
         if start is not None and not (start<published<=end): continue
@@ -315,17 +323,36 @@ async def scheduler():
         next_hour = t.replace(minute=0,second=0,microsecond=0)+timedelta(hours=1)
         await asyncio.sleep((next_hour-t).total_seconds())
 
+async def ml_scheduler():
+    while True:
+        try:
+            await asyncio.to_thread(ml_bridge.run, db, now)
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+async def ml_result_scheduler():
+    while True:
+        try:
+            with db() as c:
+                cfg = ml_bridge.config(c)
+            await asyncio.to_thread(ml_bridge.sync_results, db, now, cfg)
+        except Exception:
+            pass
+        await asyncio.sleep(10)
+
 @asynccontextmanager
 async def lifespan(app):
     init()
     shifts()
     task = asyncio.create_task(scheduler())
+    ml_task = asyncio.create_task(ml_scheduler())
+    result_task = asyncio.create_task(ml_result_scheduler())
     yield
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    ml_task.cancel()
+    result_task.cancel()
+    await asyncio.gather(task, ml_task, result_task, return_exceptions=True)
 
 app = FastAPI(title='資安新聞交班台', lifespan=lifespan)
 
@@ -359,6 +386,10 @@ def state(actor=Depends(user)):
             e['articles'] = [dict(r) for r in c.execute('SELECT id,title,url,summary,published,collected,source,source_status,source_reason,original_published,resolved_url FROM articles WHERE event_id=? ORDER BY id', (e['id'],))]
             e['title']=event_title(c,e)
             for article in e['articles']:
+                ml = c.execute('SELECT status,result,error,analyzed_at,service FROM ml_articles WHERE article_id=?',(article['id'],)).fetchone()
+                article['ml'] = dict(ml) if ml else None
+                if article['ml'] and article['ml']['result']:
+                    article['ml']['result'] = json.loads(article['ml']['result'])
                 article['discovery_url']=article['url']
                 article['url']=article['resolved_url'] or article['url']
                 article['title']=clean_title(article['title'],article['source'])
@@ -576,7 +607,7 @@ def change_keyword(body: KeywordChange):
 
 
 SHORT_LOCK = threading.Lock()
-SHORT_RETRY_AFTER = 0.0
+SHORT_RETRY_AFTER = {'spoo.me':0.0,'is.gd':0.0}
 
 class ShortenInput(BaseModel):
     ids: list[int] = Field(max_length=50)
@@ -587,7 +618,7 @@ def short_links(body: ShortenInput):
     if not SHORT_LOCK.acquire(blocking=False):
         raise HTTPException(409, '正在產生短網址，請稍後再試')
     try:
-        links, failed = {}, 0
+        links, failed, errors = {}, 0, []
         with db() as c:
             urls=[]
             for event_id in dict.fromkeys(body.ids):
@@ -602,25 +633,150 @@ def short_links(body: ShortenInput):
                     cached=c.execute('SELECT short_url FROM short_links WHERE url=?',(url,)).fetchone()
                 if cached:
                     links[url]=cached[0]; continue
-                if time.monotonic()<SHORT_RETRY_AFTER or time.monotonic()>deadline:
-                    failed+=1; continue
-                try:
-                    r=client.post('https://spoo.me/',data={'url':url},headers={'Accept':'application/json'})
-                    r.raise_for_status()
-                    data=r.json()
-                    if data.get('errorcode'):
-                        raise ValueError('Shortener error')
-                    short=data.get('short_url','')
-                    if short.startswith('http://spoo.me/'):
-                        short='https://'+short[len('http://'):]
-                    if not re.fullmatch(r'https://spoo[.]me/[A-Za-z0-9_-]+',short):
-                        raise ValueError('Unexpected short URL')
-                    with db() as c:
-                        c.execute('INSERT OR REPLACE INTO short_links VALUES (?,?)',(url,short))
-                    links[url]=short
-                except Exception:
+                reasons=[]
+                for provider,endpoint in [('spoo.me','https://spoo.me/'),('is.gd','https://is.gd/create.php')]:
+                    if time.monotonic()>deadline:
+                        reasons.append('整批處理時間已到'); break
+                    if time.monotonic()<SHORT_RETRY_AFTER[provider]:
+                        reasons.append(provider+' 暫時冷卻中'); continue
+                    try:
+                        payload={'url':url}
+                        if provider=='is.gd': payload['format']='json'
+                        r=client.post(endpoint,data=payload,headers={'Accept':'application/json'})
+                        r.raise_for_status()
+                        data=r.json()
+                        if data.get('errorcode'):
+                            if str(data['errorcode'])=='3': SHORT_RETRY_AFTER[provider]=time.monotonic()+60
+                            raise ValueError('服務拒絕網址，代碼 '+str(data['errorcode']))
+                        short=data.get('short_url','')
+                        if short.startswith('http://'+provider+'/'): short='https://'+short[7:]
+                        if not re.fullmatch(r'https://'+re.escape(provider)+r'/[A-Za-z0-9_-]+',short):
+                            raise ValueError('服務回傳格式不符')
+                        with db() as c:
+                            c.execute('INSERT OR REPLACE INTO short_links VALUES (?,?)',(url,short))
+                        links[url]=short
+                        break
+                    except Exception as error:
+                        if isinstance(error,httpx.HTTPStatusError):
+                            code=error.response.status_code
+                            reason='HTTP '+str(code)
+                            if code==429 or code>=500: SHORT_RETRY_AFTER[provider]=time.monotonic()+60
+                        elif isinstance(error,httpx.TimeoutException):
+                            reason='連線逾時'; SHORT_RETRY_AFTER[provider]=time.monotonic()+60
+                        elif isinstance(error,httpx.RequestError):
+                            reason='連線失敗'; SHORT_RETRY_AFTER[provider]=time.monotonic()+60
+                        elif isinstance(error,ValueError): reason=str(error) if str(error).startswith('服務') else '回應不是有效 JSON'
+                        else: reason='處理失敗'
+                        reasons.append(provider+'：'+reason)
+                if url not in links:
                     failed+=1
-                    SHORT_RETRY_AFTER=time.monotonic()+60
-        return {'links':links,'failed':failed}
+                    errors.append({'url':url,'reason':'；'.join(reasons)})
+        return {'links':links,'failed':failed,'errors':errors}
     finally:
         SHORT_LOCK.release()
+
+class MLSettings(BaseModel):
+    enabled: bool = False
+    url: str = Field(default='', max_length=500)
+    token: str | None = Field(default=None, max_length=1000)
+
+@app.get('/api/ml/settings')
+def ml_settings():
+    with db() as c:
+        return ml_bridge.config(c, public=True)
+
+@app.post('/api/ml/settings')
+def save_ml(body: MLSettings):
+    try:
+        url = ml_bridge.validate_endpoint(body.url) if body.url else ''
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    with db() as c:
+        old = ml_bridge.config(c)
+        token = body.token if body.token is not None else (old['token'] if old['url'] == url else '')
+        if body.enabled and (not url or not token):
+            raise HTTPException(400, '啟用前請填寫 ML 位址與 Token；更換位址須重新輸入 Token')
+        c.execute("INSERT OR REPLACE INTO settings VALUES('ml',?)", (json.dumps({'enabled': body.enabled, 'url': url, 'token': token}),))
+        audit(c, 'internal-user', 'ml_settings', {'enabled': body.enabled, 'url': url})
+    return ml_settings()
+
+@app.post('/api/ml/test')
+def test_ml():
+    with db() as c:
+        cfg = ml_bridge.config(c)
+    try:
+        # Authenticated endpoint; /health alone cannot verify the token.
+        result = ml_bridge.request(cfg, '/v1/dashboard?profile=soc&client_id=soc-news')
+        if not isinstance(result, dict):
+            raise ValueError('無效回應')
+    except Exception as error:
+        raise HTTPException(502, 'ML 連線或授權失敗：'+type(error).__name__)
+    return {'ok': True}
+
+@app.post('/api/ml/run')
+async def run_ml():
+    with db() as c:
+        if not ml_bridge.config(c)['enabled']:
+            raise HTTPException(400, '請先啟用 ML 分析')
+    if ml_bridge.LOCK.locked():
+        raise HTTPException(409, '分析中，請稍後查看結果')
+    asyncio.create_task(asyncio.to_thread(ml_bridge.run, db, now))
+    return {'ok': True}
+
+@app.get('/api/ml/articles/{article_id}')
+def ml_article(article_id: int):
+    with db() as c:
+        row = c.execute('SELECT * FROM ml_articles WHERE article_id=?', (article_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, '尚未擷取正文')
+        result = dict(row)
+        result['feedback'] = [dict(r) for r in c.execute('SELECT label,reason,created,status,kind,relation,other_remote_id,error FROM ml_feedback WHERE article_id=? ORDER BY id DESC', (article_id,))]
+        cfg = ml_bridge.config(c)
+        result['pair_candidates'] = [dict(r) for r in c.execute("SELECT a.id,a.title FROM articles a JOIN ml_articles m ON m.article_id=a.id WHERE m.status='done' AND m.service=? AND a.id!=? ORDER BY a.id DESC",(cfg['url'],article_id))]
+    result['remote_feedback'] = None
+    if row['status']=='done' and row['service']==cfg['url'] and cfg['enabled']:
+        try:
+            remote = json.loads(row['result'])['article_id']
+            result['remote_feedback'] = ml_bridge.request(cfg, '/v1/article?id='+str(remote)+'&client_id=soc-news')
+            semantic = result['remote_feedback'].get('semantic')
+            if isinstance(semantic,dict) and 'duplicate_decision' in semantic:
+                current = json.loads(row['result'])
+                current.update({k:v for k,v in semantic.items() if k.startswith('duplicate_')})
+                with db() as c:
+                    if ml_bridge.config(c) == cfg:
+                        c.execute('UPDATE ml_articles SET result=?,analyzed_at=?,error=NULL WHERE article_id=? AND service=?',(json.dumps(current),now(),article_id,cfg['url']))
+                result['result'] = json.dumps(current)
+
+        except Exception as error:
+            result['sync_error'] = '最新歷史讀取失敗：'+type(error).__name__
+    return result
+
+class MLFeedback(BaseModel):
+    label: int | None = Field(default=None, ge=0, le=1, strict=True)
+    reason: str = Field(min_length=1, max_length=2000)
+    kind: str = 'relevance'
+    other_article_id: int | None = None
+    relation: str | None = None
+
+@app.post('/api/ml/articles/{article_id}/feedback')
+def ml_feedback(article_id: int, body: MLFeedback):
+    if body.kind not in ('relevance','relation') or (body.kind=='relevance' and body.label is None):
+        raise HTTPException(400,'請選擇有效回饋種類與標記')
+    with db() as c:
+        cfg = ml_bridge.config(c)
+        row = c.execute('SELECT * FROM ml_articles WHERE article_id=?', (article_id,)).fetchone()
+        if not cfg['enabled'] or not row or row['status'] != 'done' or row['service'] != cfg['url']:
+            raise HTTPException(400, '請先完成目前 ML 服務的分析')
+        remote = json.loads(row['result'])['article_id']
+        other_remote = None
+        if body.kind=='relation':
+            other = c.execute("SELECT result FROM ml_articles WHERE article_id=? AND status='done' AND service=?",(body.other_article_id,cfg['url'])).fetchone()
+            if not other or body.other_article_id==article_id or body.relation not in ('duplicate','update','different'):
+                raise HTTPException(400,'請選另一篇已分析文章及有效關係')
+            other_remote=json.loads(other['result'])['article_id']
+            if other_remote==remote:
+                raise HTTPException(400,'兩篇指向同一 ML 文章，無須再標記配對')
+        c.execute('''INSERT INTO ml_feedback(article_id,label,reason,created,status,service,remote_id,kind,other_remote_id,relation,request_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                  (article_id, body.label if body.kind=='relevance' else None, body.reason, now(), 'pending', cfg['url'], remote,body.kind,other_remote,body.relation,str(ml_bridge.uuid.uuid4())))
+    return {'queued': True}

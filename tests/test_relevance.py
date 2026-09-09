@@ -54,3 +54,23 @@ def test_financial_focus_is_excluded_even_for_security_companies():
 def test_security_vendor_technical_news_remains():
     assert security_relevant("CrowdStrike發布資安防禦工具")
     assert security_relevant("Okta帳號系統漏洞修補")
+
+
+@pytest.mark.parametrize('title,summary',[
+ ('高橋一生拒報《零日攻擊》金鐘男主 製作人揭報獎卡關內幕',''),
+ ('《零日攻擊》首播收視奪冠','劇情描寫駭客入侵伺服器及個資外洩'),
+ ('零日攻擊發布正式預告','台劇描述台海危機與網路安全威脅'),
+ ('高橋一生出席東京記者會','影集《零日攻擊》演員談劇情'),
+ ('《零日攻擊》劇中平台遭駭個資外洩','演員分享拍攝心得'),
+])
+def test_zero_day_drama_excluded(title,summary):
+    assert not security_relevant(title,summary)
+
+@pytest.mark.parametrize('title,summary',[
+ ('Chrome修補零日攻擊漏洞',''),
+ ('串流平台遭駭，訂戶個資外洩','平台正在播出影集《零日攻擊》'),
+ ('《零日攻擊》播出平台遭駭，會員資料外洩',''),
+ ('研究人員揭露CVE-2026-1234零日漏洞','報導提及影集零日攻擊'),
+])
+def test_real_incident_with_drama_reference_kept(title,summary):
+    assert security_relevant(title,summary)

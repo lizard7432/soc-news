@@ -1,0 +1,13 @@
+# Optional override: docker compose -f compose.yaml -f compose.ml.yaml up -d
+# Create the shared ml-services network and deploy the ML service first.
+services:
+  soc-news:
+    environment:
+      ML_ALLOWED_HOSTS: article-learning
+    networks:
+      - default
+      - ml-services
+networks:
+  ml-services:
+    external: true
+    name: ml-services

@@ -19,7 +19,7 @@ def validate_url(url):
         raise ValueError('此網域尚未支援，請查看支援來源；新增訂閱不會自動授權未知媒體')
     return url
 
-def read_feed(url):
+def read_feed(url, document=False):
     with httpx.Client(timeout=20, follow_redirects=False, trust_env=False, headers={'User-Agent': 'SOCNews/1.0 RSS Reader'}) as client:
         for _ in range(6):
             validate_url(url)
@@ -42,6 +42,8 @@ def read_feed(url):
                     if size > 4_000_000:
                         raise ValueError('訂閱內容超過 4 MB 上限')
                     chunks.append(chunk)
+                if document:
+                    return b''.join(chunks), url
                 feed = feedparser.parse(b''.join(chunks))
                 if not feed.version:
                     raise ValueError('這不是有效的 RSS／Atom 訂閱，請勿填入網站首頁')

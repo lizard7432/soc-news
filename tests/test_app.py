@@ -52,7 +52,7 @@ def test_short_links_cache_and_failure(monkeypatch):
             calls.append(data['url'])
             return type('Reply',(),{'raise_for_status':lambda self:None,'json':lambda self:{'short_url':'http://spoo.me/Test123'}})()
     monkeypatch.setattr(m.httpx,'Client',Shortener)
-    monkeypatch.setattr(m,'SHORT_RETRY_AFTER',0)
+    monkeypatch.setattr(m,'SHORT_RETRY_AFTER',{'spoo.me':0,'is.gd':0})
     assert m.short_links(m.ShortenInput(ids=[1]))['links'][url]=='https://spoo.me/Test123'
     assert m.short_links(m.ShortenInput(ids=[1]))['links'][url]=='https://spoo.me/Test123'
     assert calls==[url]
@@ -61,7 +61,19 @@ def test_short_links_cache_and_failure(monkeypatch):
     def fail(*args,**kwargs): raise RuntimeError('offline')
     monkeypatch.setattr(Shortener,'post',fail)
     result=m.short_links(m.ShortenInput(ids=[1]))
-    assert result=={'links':{},'failed':1}
+    assert result['links']=={} and result['failed']==1 and result['errors']
+    endpoints=[]
+    def fallback(self,endpoint,data,headers):
+        endpoints.append(endpoint)
+        if 'spoo.me' in endpoint: raise m.httpx.ConnectTimeout('timeout')
+        assert data['format']=='json'
+        return type('Reply',(),{'raise_for_status':lambda self:None,'json':lambda self:{'short_url':'https://is.gd/Backup123'}})()
+    monkeypatch.setattr(Shortener,'post',fallback)
+    reply=m.short_links(m.ShortenInput(ids=[1]))
+    assert reply['links'][url]=='https://is.gd/Backup123'
+    assert endpoints==['https://spoo.me/','https://is.gd/create.php']
+    assert m.SHORT_RETRY_AFTER['spoo.me']>0 and m.SHORT_RETRY_AFTER['is.gd']==0
+
     with m.db() as c:
         assert c.execute('SELECT exported FROM events WHERE id=1').fetchone()[0] is None
 
